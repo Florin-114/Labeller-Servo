@@ -77,7 +77,7 @@ constexpr uint32_t DEBOUNCE_SENSOR_US     = 50;    // Gap minimum transit time (
 constexpr uint32_t SENSOR_TIMEOUT_US      = 30000000;  // 30 seconds safety timeout
 
 // ============ STATES ============
-enum State { IDLE, ACCEL, RUNNING, CREEP, HOMING, AUTO_DETECT };
+enum State { IDLE, ACCEL, RUNNING, CREEP, HOMING, AUTO_DETECT, CALIBRATING };
 volatile State state = IDLE;
 
 // ============ FLAGS ============
@@ -141,6 +141,12 @@ bool home_requested = false;           // HOME button pressed
 bool auto_detect_requested = false;    // Auto-detect label length
 uint32_t auto_detect_pulse_start = 0;  // pulse count at start of auto-detect
 uint32_t slowdown_pulses = 0;         // computed: SERVO_LABEL_LENGTH * SERVO_SLOWDOWN_PCT
+
+// Calibration
+bool calibrate_requested = false;
+float calibrate_distance_mm = 60.0f;  // commanded distance for calibration
+uint32_t calibrate_pulses = 0;        // pulses to send = distance × SERVO_PULSES_PER_MM
+float SERVO_CALIB_SPEED_HZ = 5000.0f; // slow calibration speed (Hz)
 
 // ============ CONVEYOR VARIABLES (4 independent) ===========
 // Target frequencies in Hz (set from web UI)
@@ -578,6 +584,18 @@ void task_conveyor_control(void*){
         state = IDLE;
       }
     }
+    // CALIBRATION mode — move exact number of pulses at slow speed
+    else if(state == CALIBRATING){
+      servo_pulse_count = get_servo_pulses();
+      if(servo_pulse_count >= calibrate_pulses){
+        servo_stop();
+        Serial.print("CALIBRATE: Done. Pulses=");
+        Serial.print(servo_pulse_count);
+        Serial.print(" commanded_mm=");
+        Serial.println(calibrate_distance_mm);
+        state = IDLE;
+      }
+    }
 
     // FIX: Moved outside if(vac_counting) block so target_was_active always updates
     // Prevents stale value from causing false cleanup and losing pulses on new cycle
@@ -655,6 +673,34 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       <tr><td>Slowdown %</td><td><input type="number" step="1" min="80" max="99" name="slowpct" value="%SLOWPCT%" class="blue-bg"><button class="apply-btn" onclick="ap('slowpct',this)">Apply</button></td></tr>
       <tr><td>Safety Max Pulses</td><td><input type="number" step="100" name="servomaxp" value="%SERVOMAXP%" class="blue-bg"><button class="apply-btn" onclick="ap('servomaxp',this)">Apply</button></td></tr>
       </table>
+      <div style="margin-top:10px;padding:8px;background:#2a2a2a;border:1px solid #444;border-radius:6px;">
+        <strong style="color:#e0c040;">Calibration</strong>
+        <table style="width:100%;font-size:13px;border-collapse:collapse;margin-top:4px;">
+        <tr><td>Index Distance (mm)</td><td>
+          <input type="number" step="0.1" min="1" max="500" id="calDist" value="60" style="width:70px;" class="blue-bg">
+          <button class="en-btn on" onclick="fetch('/set?calibrate='+document.getElementById('calDist').value)" style="padding:5px 12px;">INDEX</button>
+        </td></tr>
+        <tr><td>Measured Distance (mm)</td><td>
+          <input type="number" step="0.01" min="0.1" max="500" id="calMeasured" value="" placeholder="enter real mm" style="width:100px;" class="blue-bg">
+          <button class="en-btn on" onclick="calcCalib()" style="padding:5px 12px;">CALCULATE</button>
+        </td></tr>
+        </table>
+        <div id="calibResult" style="margin-top:6px;font-size:12px;color:#9a9a9a;display:none;">
+          <div style="background:#1a1a2e;padding:8px;border-radius:4px;border:1px solid #555;">
+            <div>Commanded: <b id="calCmd">--</b> mm | Measured: <b id="calMeas">--</b> mm</div>
+            <div>Current pulses/mm: <b id="calCurPPM">--</b></div>
+            <div>Corrected pulses/mm: <b style="color:#4ec9b0;" id="calNewPPM">--</b></div>
+            <div style="margin-top:6px;color:#e0c040;">
+              <b>Servo Drive Parameters:</b><br>
+              Current e-gear: PA12=<b id="calPA12old">--</b> / PA13=<b id="calPA13old">--</b><br>
+              <span style="color:#4ec9b0;font-size:14px;">Set PA12 = <b id="calPA12">--</b> (keep PA13 = <b id="calPA13">--</b>)</span>
+            </div>
+            <div style="margin-top:4px;">
+              <button class="en-btn on" onclick="applyCalib()" style="padding:5px 12px;">APPLY CORRECTED PULSES/MM</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="group">
@@ -806,6 +852,38 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         .then(function(r){ btn.classList.add('ok'); btn.textContent='OK'; setTimeout(function(){ btn.classList.remove('ok'); btn.textContent='Apply'; },1000); })
         .catch(function(){ btn.textContent='Error'; setTimeout(function(){ btn.textContent='Apply'; },1500); });
     }
+    function calcCalib(){
+      var cmd = parseFloat(document.getElementById('calDist').value);
+      var meas = parseFloat(document.getElementById('calMeasured').value);
+      if(!meas || meas < 0.1){ alert('Enter the measured distance'); return; }
+      var curPPM = %SERVOPPMM%;
+      var newPPM = cmd * curPPM / meas;
+      // E-gear: current PA12 assumes 10000 pulses/rev
+      // roller_circ = PI * 53mm, gearbox = 5:1
+      // mm_per_rev = PI * 53 / 5 = 33.301 mm
+      // PA12_current = curPPM * mm_per_rev = curPPM * 33.301
+      var mmPerRev = Math.PI * 53.0 / 5.0;
+      var pa12old = Math.round(curPPM * mmPerRev);
+      var pa12new = Math.round(newPPM * mmPerRev);
+      var pa13 = 1;  // denominator stays 1
+      document.getElementById('calCmd').textContent = cmd.toFixed(1);
+      document.getElementById('calMeas').textContent = meas.toFixed(2);
+      document.getElementById('calCurPPM').textContent = curPPM.toFixed(2);
+      document.getElementById('calNewPPM').textContent = newPPM.toFixed(2);
+      document.getElementById('calPA12old').textContent = pa12old;
+      document.getElementById('calPA13old').textContent = pa13;
+      document.getElementById('calPA12').textContent = pa12new;
+      document.getElementById('calPA13').textContent = pa13;
+      document.getElementById('calibResult').style.display = 'block';
+      // Store for apply
+      window._calNewPPM = newPPM;
+    }
+    function applyCalib(){
+      if(!window._calNewPPM){ alert('Calculate first'); return; }
+      fetch('/set?servoppmm=' + window._calNewPPM.toFixed(4))
+        .then(function(){ alert('Pulses/mm updated to ' + window._calNewPPM.toFixed(2)); location.reload(); })
+        .catch(function(){ alert('Error'); });
+    }
     function tog(param, btnId) {
       var btn = document.getElementById(btnId);
       var cur = btn.classList.contains('on');
@@ -945,7 +1023,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           document.getElementById('vacCount').textContent = data.vac_count;
           document.getElementById('vacTarget').textContent = data.vac_target;
           document.getElementById('savedVac').textContent = data.saved_vac;
-          var stateLabels = ['IDLE','ACCEL','RUNNING','CREEP','HOMING','AUTO-DETECT'];
+          var stateLabels = ['IDLE','ACCEL','RUNNING','CREEP','HOMING','AUTO-DETECT','CALIBRATING'];
           document.getElementById('stateLabel').textContent = stateLabels[data.state] || 'UNKNOWN';
 
           var sysActive = document.getElementById('systemActive');
@@ -1635,7 +1713,7 @@ void handleRoot() {
   html.replace("%SYSTEMACTIVE%", sys_active ? "ON" : "OFF");
 
   // State label
-  const char* stateLabelsArr[] = {"IDLE", "ACCEL", "RUNNING", "CREEP", "HOMING", "AUTO-DETECT"};
+  const char* stateLabelsArr[] = {"IDLE", "ACCEL", "RUNNING", "CREEP", "HOMING", "AUTO-DETECT", "CALIBRATING"};
   html.replace("%STATELABEL%", stateLabelsArr[current_state]);
 
   server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
@@ -1653,6 +1731,7 @@ void handleSet() {
   if (server.hasArg("servomaxp")) SERVO_MAX_PULSES = constrain(server.arg("servomaxp").toInt(), 1000, 500000);
   if (server.hasArg("home")) home_requested = true;
   if (server.hasArg("autodetect")) auto_detect_requested = true;
+  if (server.hasArg("calibrate")) { calibrate_distance_mm = constrain(server.arg("calibrate").toFloat(), 1.0f, 500.0f); calibrate_requested = true; }
   if (server.hasArg("maxvacnobarcode")) MAX_VAC_PULSES_NO_BARCODE = constrain(server.arg("maxvacnobarcode").toInt(), 100, 100000);
 
   // Conveyor VAC with bounds
@@ -2308,6 +2387,19 @@ void loop(){
       servo_start(SERVO_BASE_SPEED_HZ);
       state = AUTO_DETECT;
       Serial.println("AUTO-DETECT: Starting...");
+    }
+
+    // ============ CALIBRATION INDEX ============
+    if(calibrate_requested && state == IDLE){
+      calibrate_requested = false;
+      calibrate_pulses = (uint32_t)(calibrate_distance_mm * SERVO_PULSES_PER_MM + 0.5f);
+      servo_start(SERVO_CALIB_SPEED_HZ);
+      state = CALIBRATING;
+      Serial.print("CALIBRATE: Indexing ");
+      Serial.print(calibrate_distance_mm);
+      Serial.print("mm = ");
+      Serial.print(calibrate_pulses);
+      Serial.println(" pulses at slow speed");
     }
   } // end system_active
 }
