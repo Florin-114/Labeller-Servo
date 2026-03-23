@@ -374,18 +374,25 @@ void IRAM_ATTR precision_check_isr(){
 
 // ============ SERVO HELPERS ============
 void servo_start(float freq){
+  pcnt_counter_pause(PCNT_UNIT_0);
   pcnt_counter_clear(PCNT_UNIT_0);
   pcnt_overflow_count = 0;
   servo_pulse_count = 0;
+  pcnt_counter_resume(PCNT_UNIT_0);
   servo_current_freq = freq;
+  mcpwm_start(MCPWM_UNIT_0, MCPWM_TIMER_0);
   mcpwm_set_frequency(MCPWM_UNIT_0, MCPWM_TIMER_0, (uint32_t)freq);
   mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, 50.0f);
   mcpwm_set_duty_type(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, MCPWM_DUTY_MODE_0);
   servo_running = true;
+  Serial.print("MCPWM started at ");
+  Serial.print((uint32_t)freq);
+  Serial.println(" Hz");
 }
 
 void servo_stop(){
   mcpwm_set_signal_low(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A);
+  mcpwm_stop(MCPWM_UNIT_0, MCPWM_TIMER_0);
   servo_running = false;
   servo_current_freq = 0;
 }
@@ -2422,34 +2429,35 @@ void loop(){
       Serial.println("Servo: ACCEL");
     }
 
-    // ============ HOME SEQUENCE ============
-    if(home_requested && state == IDLE){
-      home_requested = false;
-      servo_start(SERVO_BASE_SPEED_HZ);  // Creep slowly
-      state = HOMING;
-      Serial.println("HOME: Searching for gap...");
-    }
-
-    // ============ AUTO-DETECT LABEL LENGTH ============
-    if(auto_detect_requested && state == IDLE){
-      auto_detect_requested = false;
-      auto_detect_pulse_start = 0;
-      servo_start(SERVO_BASE_SPEED_HZ);
-      state = AUTO_DETECT;
-      Serial.println("AUTO-DETECT: Starting...");
-    }
-
-    // ============ CALIBRATION INDEX ============
-    if(calibrate_requested && state == IDLE){
-      calibrate_requested = false;
-      calibrate_pulses = (uint32_t)(calibrate_distance_mm * SERVO_PULSES_PER_MM + 0.5f);
-      servo_start(SERVO_CALIB_SPEED_HZ);
-      state = CALIBRATING;
-      Serial.print("CALIBRATE: Indexing ");
-      Serial.print(calibrate_distance_mm);
-      Serial.print("mm = ");
-      Serial.print(calibrate_pulses);
-      Serial.println(" pulses at slow speed");
-    }
   } // end system_active
+
+  // ============ HOME SEQUENCE (works without system_active) ============
+  if(home_requested && state == IDLE){
+    home_requested = false;
+    servo_start(SERVO_BASE_SPEED_HZ);
+    state = HOMING;
+    Serial.println("HOME: Searching for gap...");
+  }
+
+  // ============ AUTO-DETECT LABEL LENGTH (works without system_active) ============
+  if(auto_detect_requested && state == IDLE){
+    auto_detect_requested = false;
+    auto_detect_pulse_start = 0;
+    servo_start(SERVO_BASE_SPEED_HZ);
+    state = AUTO_DETECT;
+    Serial.println("AUTO-DETECT: Starting...");
+  }
+
+  // ============ CALIBRATION INDEX (works without system_active) ============
+  if(calibrate_requested && state == IDLE){
+    calibrate_requested = false;
+    calibrate_pulses = (uint32_t)(calibrate_distance_mm * SERVO_PULSES_PER_MM + 0.5f);
+    servo_start(SERVO_CALIB_SPEED_HZ);
+    state = CALIBRATING;
+    Serial.print("CALIBRATE: Indexing ");
+    Serial.print(calibrate_distance_mm);
+    Serial.print("mm = ");
+    Serial.print(calibrate_pulses);
+    Serial.println(" pulses at slow speed");
+  }
 }
