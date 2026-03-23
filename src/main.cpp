@@ -690,13 +690,28 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             <div>Commanded: <b id="calCmd">--</b> mm | Measured: <b id="calMeas">--</b> mm</div>
             <div>Current pulses/mm: <b id="calCurPPM">--</b></div>
             <div>Corrected pulses/mm: <b style="color:#4ec9b0;" id="calNewPPM">--</b></div>
-            <div style="margin-top:6px;color:#e0c040;">
-              <b>Servo Drive Parameters:</b><br>
-              Current e-gear: PA12=<b id="calPA12old">--</b> / PA13=<b id="calPA13old">--</b><br>
-              <span style="color:#4ec9b0;font-size:14px;">Set PA12 = <b id="calPA12">--</b> (keep PA13 = <b id="calPA13">--</b>)</span>
+            <div style="margin-top:8px;color:#e0c040;">
+              <b>P100S Drive Parameters (PA Group):</b>
+              <table style="width:100%;font-size:12px;margin-top:4px;border-collapse:collapse;">
+              <tr style="border-bottom:1px solid #444;"><td>PA4</td><td>Control mode</td><td><b>0</b> (position)</td></tr>
+              <tr style="border-bottom:1px solid #444;"><td>PA14</td><td>Pulse input mode</td><td><b>0</b> (pulse+dir)</td></tr>
+              <tr style="border-bottom:1px solid #444;"><td>PA19</td><td>Smooth filter</td><td><b>0</b> (disabled)</td></tr>
+              <tr style="border-bottom:1px solid #444;"><td>PA53</td><td>Force servo enable</td><td><b>1</b></td></tr>
+              <tr style="border-bottom:1px solid #444;">
+                <td>PA11</td><td>Pulses/rev</td>
+                <td>Current: <b id="calPA11old">--</b> → Corrected: <b style="color:#4ec9b0;" id="calPA11new">--</b></td>
+              </tr>
+              </table>
+              <div style="margin-top:6px;font-size:11px;color:#888;">
+                <b>Option A (recommended):</b> Keep PA11=<span id="calPA11keep">--</span>, change ESP32 pulses/mm<br>
+                <b>Option B (drive-side):</b> Set PA11=<b style="color:#4ec9b0;" id="calPA11alt">--</b>, keep ESP32 pulses/mm=<span id="calPPMkeep">--</span>
+              </div>
+              <div style="margin-top:4px;font-size:11px;color:#666;">
+                PA12/PA13 e-gear: only used if PA11=0. PA78/PA79: alternative e-gear numerators (not needed).
+              </div>
             </div>
-            <div style="margin-top:4px;">
-              <button class="en-btn on" onclick="applyCalib()" style="padding:5px 12px;">APPLY CORRECTED PULSES/MM</button>
+            <div style="margin-top:6px;">
+              <button class="en-btn on" onclick="applyCalib()" style="padding:5px 12px;">APPLY Option A (update ESP32 pulses/mm)</button>
             </div>
           </div>
         </div>
@@ -858,24 +873,23 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       if(!meas || meas < 0.1){ alert('Enter the measured distance'); return; }
       var curPPM = %SERVOPPMM%;
       var newPPM = cmd * curPPM / meas;
-      // E-gear: current PA12 assumes 10000 pulses/rev
-      // roller_circ = PI * 53mm, gearbox = 5:1
-      // mm_per_rev = PI * 53 / 5 = 33.301 mm
-      // PA12_current = curPPM * mm_per_rev = curPPM * 33.301
+      // PA11 = pulses per motor revolution (default 10000)
+      // mm_per_rev = PI * roller_dia / gear_ratio = PI * 53 / 5 = 33.301 mm
       var mmPerRev = Math.PI * 53.0 / 5.0;
-      var pa12old = Math.round(curPPM * mmPerRev);
-      var pa12new = Math.round(newPPM * mmPerRev);
-      var pa13 = 1;  // denominator stays 1
+      var pa11current = Math.round(curPPM * mmPerRev);
+      // Option A: keep PA11, change ESP32 pulses/mm
+      // Option B: keep ESP32 pulses/mm, change PA11
+      var pa11new = Math.round(newPPM * mmPerRev);
       document.getElementById('calCmd').textContent = cmd.toFixed(1);
       document.getElementById('calMeas').textContent = meas.toFixed(2);
       document.getElementById('calCurPPM').textContent = curPPM.toFixed(2);
       document.getElementById('calNewPPM').textContent = newPPM.toFixed(2);
-      document.getElementById('calPA12old').textContent = pa12old;
-      document.getElementById('calPA13old').textContent = pa13;
-      document.getElementById('calPA12').textContent = pa12new;
-      document.getElementById('calPA13').textContent = pa13;
+      document.getElementById('calPA11old').textContent = pa11current;
+      document.getElementById('calPA11new').textContent = pa11new;
+      document.getElementById('calPA11keep').textContent = pa11current;
+      document.getElementById('calPA11alt').textContent = pa11new;
+      document.getElementById('calPPMkeep').textContent = curPPM.toFixed(2);
       document.getElementById('calibResult').style.display = 'block';
-      // Store for apply
       window._calNewPPM = newPPM;
     }
     function applyCalib(){
