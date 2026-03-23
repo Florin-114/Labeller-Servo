@@ -20,7 +20,10 @@ Preferences prefs;
 // ============ SERVO LABELLER CONSTANTS ============
 float SERVO_PULSES_PER_MM = 300.0f;   // 10000 pulses/rev, 5:1 gear, 53mm roller
 float SERVO_RUN_SPEED_HZ = 100000.0f; // run speed (Hz) — 100kHz = 333 mm/s
-float SERVO_ACCEL_HZ_S = 500000.0f;   // acceleration in Hz/s (200ms to 100kHz)
+float SERVO_HS_ACCEL = 500000.0f;     // high speed acceleration Hz/s (ramp to run speed)
+float SERVO_HS_DECEL = 1000000.0f;   // high speed deceleration Hz/s (run → creep)
+float SERVO_LS_ACCEL = 50000.0f;     // low speed acceleration Hz/s (ramp to creep)
+float SERVO_LS_DECEL = 100000.0f;    // low speed deceleration Hz/s (creep → stop)
 float SERVO_BASE_SPEED_HZ = 10000.0f; // creep speed after slowdown (Hz) = 33 mm/s
 uint32_t SERVO_LABEL_LENGTH = 24000;  // label length in pulses (80mm × 300)
 float SERVO_SLOWDOWN_PCT = 0.95f;     // slow down at 95% of label length
@@ -482,8 +485,8 @@ void task_conveyor_control(void*){
       servo_pulse_count = get_servo_pulses();
 
       if(state == ACCEL){
-        // Ramp frequency up
-        servo_current_freq = min(SERVO_RUN_SPEED_HZ, servo_current_freq + SERVO_ACCEL_HZ_S * dt);
+        // Ramp up using high speed acceleration
+        servo_current_freq = min(SERVO_RUN_SPEED_HZ, servo_current_freq + SERVO_HS_ACCEL * dt);
         servo_set_freq(servo_current_freq);
         if(servo_current_freq >= SERVO_RUN_SPEED_HZ){
           state = RUNNING;
@@ -491,20 +494,22 @@ void task_conveyor_control(void*){
         }
       }
       else if(state == RUNNING){
-        // Check if pulse count reached slowdown threshold
+        // Check if pulse count reached slowdown threshold or gap detected
+        bool do_creep = false;
         if(servo_pulse_count >= slowdown_pulses){
-          servo_set_freq(SERVO_BASE_SPEED_HZ);
-          state = CREEP;
-          Serial.print("Servo: CREEP at pulses=");
+          do_creep = true;
+          Serial.print("Servo: Slowdown at pulses=");
           Serial.println(servo_pulse_count);
         }
-        // Also check gap sensor (in case gap comes before pulse count)
         if(gap_detected){
           gap_detected = false;
-          servo_set_freq(SERVO_BASE_SPEED_HZ);
-          state = CREEP;
+          do_creep = true;
           Serial.print("Servo: Gap detected at pulses=");
           Serial.println(servo_pulse_count);
+        }
+        if(do_creep){
+          // Start decelerating from run speed toward creep speed
+          state = CREEP;
         }
         // Safety: max pulses
         if(servo_pulse_count > SERVO_MAX_PULSES){
@@ -514,10 +519,20 @@ void task_conveyor_control(void*){
         }
       }
       else if(state == CREEP){
+        // Ramp down from current speed to creep speed using HS decel
+        if(servo_current_freq > SERVO_BASE_SPEED_HZ){
+          servo_current_freq = max(SERVO_BASE_SPEED_HZ, servo_current_freq - SERVO_HS_DECEL * dt);
+          servo_set_freq(servo_current_freq);
+        }
         // Precision ISR polls sensor at 50µs and sets gap_detected + kills MCPWM
         if(gap_detected){
-          servo_stop();
           gap_detected = false;
+          // Ramp down from creep to stop using LS decel
+          if(SERVO_LS_DECEL > 0 && servo_current_freq > 100.0f){
+            // Let it decel over next ticks — for now stop (LS decel is very fast at creep speed)
+            servo_current_freq = max(0.0f, servo_current_freq - SERVO_LS_DECEL * 0.01f);
+          }
+          servo_stop();
           Serial.print("Servo: STOP at pulses=");
           Serial.println(servo_pulse_count);
           state = IDLE;
@@ -668,7 +683,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       <tr><td>Pulses per mm</td><td><input type="number" step="0.01" name="servoppmm" value="%SERVOPPMM%" class="blue-bg"><button class="apply-btn" onclick="ap('servoppmm',this)">Apply</button></td></tr>
       <tr><td>Label Length (pulses)</td><td><input type="number" step="1" name="lablen" value="%LABLEN%" class="blue-bg"><button class="apply-btn" onclick="ap('lablen',this)">Apply</button> <span style="font-size:12px;color:#9a9a9a;" id="labLenMm">%LABLENMM% mm</span></td></tr>
       <tr><td>Run Speed (Hz)</td><td><input type="number" step="100" name="servorun" value="%SERVORUN%" class="blue-bg"><button class="apply-btn" onclick="ap('servorun',this)">Apply</button> <span style="font-size:12px;color:#9a9a9a;">%SERVORUNMM% mm/s</span></td></tr>
-      <tr><td>Accel (Hz/s)</td><td><input type="number" step="1000" name="servoacc" value="%SERVOACC%" class="blue-bg"><button class="apply-btn" onclick="ap('servoacc',this)">Apply</button></td></tr>
+      <tr><td>HS Accel (Hz/s)</td><td><input type="number" step="1000" name="hsacc" value="%HSACC%" class="blue-bg"><button class="apply-btn" onclick="ap('hsacc',this)">Apply</button></td></tr>
+      <tr><td>HS Decel (Hz/s)</td><td><input type="number" step="1000" name="hsdec" value="%HSDEC%" class="blue-bg"><button class="apply-btn" onclick="ap('hsdec',this)">Apply</button></td></tr>
+      <tr><td>LS Accel (Hz/s)</td><td><input type="number" step="1000" name="lsacc" value="%LSACC%" class="blue-bg"><button class="apply-btn" onclick="ap('lsacc',this)">Apply</button></td></tr>
+      <tr><td>LS Decel (Hz/s)</td><td><input type="number" step="1000" name="lsdec" value="%LSDEC%" class="blue-bg"><button class="apply-btn" onclick="ap('lsdec',this)">Apply</button></td></tr>
       <tr><td>Creep Speed (Hz)</td><td><input type="number" step="100" name="servobase" value="%SERVOBASE%" class="blue-bg"><button class="apply-btn" onclick="ap('servobase',this)">Apply</button> <span style="font-size:12px;color:#9a9a9a;">%SERVOBASEMM% mm/s</span></td></tr>
       <tr><td>Slowdown %</td><td><input type="number" step="1" min="80" max="99" name="slowpct" value="%SLOWPCT%" class="blue-bg"><button class="apply-btn" onclick="ap('slowpct',this)">Apply</button></td></tr>
       <tr><td>Safety Max Pulses</td><td><input type="number" step="100" name="servomaxp" value="%SERVOMAXP%" class="blue-bg"><button class="apply-btn" onclick="ap('servomaxp',this)">Apply</button></td></tr>
@@ -1147,7 +1165,10 @@ void saveParams(){
   }
   prefs.putFloat("servoppmm", SERVO_PULSES_PER_MM);
   prefs.putFloat("servorun", SERVO_RUN_SPEED_HZ);
-  prefs.putFloat("servoacc", SERVO_ACCEL_HZ_S);
+  prefs.putFloat("hsacc", SERVO_HS_ACCEL);
+  prefs.putFloat("hsdec", SERVO_HS_DECEL);
+  prefs.putFloat("lsacc", SERVO_LS_ACCEL);
+  prefs.putFloat("lsdec", SERVO_LS_DECEL);
   prefs.putFloat("servobase", SERVO_BASE_SPEED_HZ);
   prefs.putUInt("lablen", SERVO_LABEL_LENGTH);
   prefs.putFloat("slowpct", SERVO_SLOWDOWN_PCT);
@@ -1189,7 +1210,10 @@ void loadParams(){
   }
   SERVO_PULSES_PER_MM = prefs.getFloat("servoppmm", SERVO_PULSES_PER_MM);
   SERVO_RUN_SPEED_HZ  = prefs.getFloat("servorun", SERVO_RUN_SPEED_HZ);
-  SERVO_ACCEL_HZ_S    = prefs.getFloat("servoacc", SERVO_ACCEL_HZ_S);
+  SERVO_HS_ACCEL      = prefs.getFloat("hsacc", SERVO_HS_ACCEL);
+  SERVO_HS_DECEL      = prefs.getFloat("hsdec", SERVO_HS_DECEL);
+  SERVO_LS_ACCEL      = prefs.getFloat("lsacc", SERVO_LS_ACCEL);
+  SERVO_LS_DECEL      = prefs.getFloat("lsdec", SERVO_LS_DECEL);
   SERVO_BASE_SPEED_HZ = prefs.getFloat("servobase", SERVO_BASE_SPEED_HZ);
   SERVO_LABEL_LENGTH  = prefs.getUInt("lablen", SERVO_LABEL_LENGTH);
   SERVO_SLOWDOWN_PCT  = prefs.getFloat("slowpct", SERVO_SLOWDOWN_PCT);
@@ -1689,7 +1713,10 @@ void handleRoot() {
   html.replace("%LABLENMM%", fmtFloat((float)SERVO_LABEL_LENGTH / SERVO_PULSES_PER_MM, 1));
   html.replace("%SERVORUN%", fmtFloat(SERVO_RUN_SPEED_HZ, 0));
   html.replace("%SERVORUNMM%", fmtFloat(SERVO_RUN_SPEED_HZ / SERVO_PULSES_PER_MM, 1));
-  html.replace("%SERVOACC%", fmtFloat(SERVO_ACCEL_HZ_S, 0));
+  html.replace("%HSACC%", fmtFloat(SERVO_HS_ACCEL, 0));
+  html.replace("%HSDEC%", fmtFloat(SERVO_HS_DECEL, 0));
+  html.replace("%LSACC%", fmtFloat(SERVO_LS_ACCEL, 0));
+  html.replace("%LSDEC%", fmtFloat(SERVO_LS_DECEL, 0));
   html.replace("%SERVOBASE%", fmtFloat(SERVO_BASE_SPEED_HZ, 0));
   html.replace("%SERVOBASEMM%", fmtFloat(SERVO_BASE_SPEED_HZ / SERVO_PULSES_PER_MM, 1));
   html.replace("%SLOWPCT%", String((int)(SERVO_SLOWDOWN_PCT * 100)));
@@ -1739,7 +1766,10 @@ void handleSet() {
   if (server.hasArg("servoppmm")) SERVO_PULSES_PER_MM = constrain(server.arg("servoppmm").toFloat(), 1.0f, 10000.0f);
   if (server.hasArg("lablen")) { SERVO_LABEL_LENGTH = constrain(server.arg("lablen").toInt(), 100, 200000); slowdown_pulses = (uint32_t)(SERVO_LABEL_LENGTH * SERVO_SLOWDOWN_PCT); SERVO_MAX_PULSES = (uint32_t)(SERVO_LABEL_LENGTH * 1.3f); }
   if (server.hasArg("servorun")) SERVO_RUN_SPEED_HZ = constrain(server.arg("servorun").toFloat(), 100.0f, 200000.0f);
-  if (server.hasArg("servoacc")) SERVO_ACCEL_HZ_S = constrain(server.arg("servoacc").toFloat(), 1000.0f, 5000000.0f);
+  if (server.hasArg("hsacc")) SERVO_HS_ACCEL = constrain(server.arg("hsacc").toFloat(), 1000.0f, 5000000.0f);
+  if (server.hasArg("hsdec")) SERVO_HS_DECEL = constrain(server.arg("hsdec").toFloat(), 1000.0f, 5000000.0f);
+  if (server.hasArg("lsacc")) SERVO_LS_ACCEL = constrain(server.arg("lsacc").toFloat(), 1000.0f, 5000000.0f);
+  if (server.hasArg("lsdec")) SERVO_LS_DECEL = constrain(server.arg("lsdec").toFloat(), 1000.0f, 5000000.0f);
   if (server.hasArg("servobase")) SERVO_BASE_SPEED_HZ = constrain(server.arg("servobase").toFloat(), 10.0f, 50000.0f);
   if (server.hasArg("slowpct")) { SERVO_SLOWDOWN_PCT = constrain(server.arg("slowpct").toFloat(), 80.0f, 99.0f) / 100.0f; slowdown_pulses = (uint32_t)(SERVO_LABEL_LENGTH * SERVO_SLOWDOWN_PCT); }
   if (server.hasArg("servomaxp")) SERVO_MAX_PULSES = constrain(server.arg("servomaxp").toInt(), 1000, 500000);
@@ -2107,7 +2137,10 @@ void setup(){
     if(!sp.begin(ns.c_str(), false)){ server.send(500, "text/plain", "nvs error"); return; }
     sp.putFloat("servoppmm", SERVO_PULSES_PER_MM);
     sp.putFloat("servorun", SERVO_RUN_SPEED_HZ);
-    sp.putFloat("servoacc", SERVO_ACCEL_HZ_S);
+    sp.putFloat("hsacc", SERVO_HS_ACCEL);
+    sp.putFloat("hsdec", SERVO_HS_DECEL);
+    sp.putFloat("lsacc", SERVO_LS_ACCEL);
+    sp.putFloat("lsdec", SERVO_LS_DECEL);
     sp.putFloat("servobase", SERVO_BASE_SPEED_HZ);
     sp.putUInt("lablen", SERVO_LABEL_LENGTH);
     sp.putFloat("slowpct", SERVO_SLOWDOWN_PCT);
@@ -2154,7 +2187,10 @@ void setup(){
     if(!sp.getBool("used", false)){ sp.end(); server.send(200, "text/plain", "empty"); return; }
     SERVO_PULSES_PER_MM = sp.getFloat("servoppmm", SERVO_PULSES_PER_MM);
     SERVO_RUN_SPEED_HZ  = sp.getFloat("servorun", SERVO_RUN_SPEED_HZ);
-    SERVO_ACCEL_HZ_S    = sp.getFloat("servoacc", SERVO_ACCEL_HZ_S);
+    SERVO_HS_ACCEL      = sp.getFloat("hsacc", SERVO_HS_ACCEL);
+    SERVO_HS_DECEL      = sp.getFloat("hsdec", SERVO_HS_DECEL);
+    SERVO_LS_ACCEL      = sp.getFloat("lsacc", SERVO_LS_ACCEL);
+    SERVO_LS_DECEL      = sp.getFloat("lsdec", SERVO_LS_DECEL);
     SERVO_BASE_SPEED_HZ = sp.getFloat("servobase", SERVO_BASE_SPEED_HZ);
     SERVO_LABEL_LENGTH  = sp.getUInt("lablen", SERVO_LABEL_LENGTH);
     SERVO_SLOWDOWN_PCT  = sp.getFloat("slowpct", SERVO_SLOWDOWN_PCT);
